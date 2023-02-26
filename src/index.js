@@ -1,5 +1,6 @@
 const { DynamoDBClient, GetItemCommand, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
@@ -8,9 +9,9 @@ const app = express();
 const appEnv = process.env.NODE_ENV || 'development';
 const tableName = process.env.APP_TABLE_NAME || `express-todo-${appEnv}`;
 const ddbclient = new DynamoDBClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
+const ssmclient = new SSMClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 
-// Secret key for JWT should be stored at secure location such as AWS Parameter Store
-const secretKey = 'mysecretkey';
+const parameterStoreJwtSecretName = `/serverless-todo/${appEnv}/jwt-secret`;
 const passwordOptions = {
   iteration: 1000,
   length: 64,
@@ -28,8 +29,20 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// Get parameter from System Parameter Store
+// Improvement: implements cache TTL
+async function getParameterStore(name)
+{
+  const inputParameter = {
+    Name: name,
+    WithDecryption: true
+  };
+  const response = await ssmclient.send(new GetParameterCommand(inputParameter));
+  return response.Parameter.Value;
+}
+
 // Middleware for JWT authentication
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   // Get token from authorization header
   const authHeader = req.headers.authorization;
   if (!authHeader) {
@@ -41,6 +54,7 @@ const authMiddleware = (req, res, next) => {
   }
   // Verify token with secret key
   try {
+    const secretKey = await getParameterStore(parameterStoreJwtSecretName);
     const decoded = jwt.verify(token, secretKey);
     req.user = decoded;
     next();
@@ -51,7 +65,17 @@ const authMiddleware = (req, res, next) => {
 
 // Route for registering a user
 app.post('/register', async (req, res) => {
-  const { username, password } = req.body;
+  const required = ['username', 'password', 'fullname', 'email'];
+  for (const field of required) {
+    if (req.body.hasOwnProperty(field) === false) {
+      return res.status(400).json({ message: `Missing "${field}" attribute` });
+    }
+    
+    if (req.body[field].length < 3) {
+      return res.status(400).json({ message: `Value of "${field}" is too short` });
+    }
+  }
+  const { username, password, email, fullname } = req.body;
   
   const existingUserParam = {
       TableName: tableName,
@@ -73,7 +97,7 @@ app.post('/register', async (req, res) => {
                           ).toString('hex');
   const createdAt = new Date().toISOString();
   
-  const user = { username, password: hashedPassword, salt };
+  const user = { username, password: hashedPassword, salt, fullname, email };
   const userItem = {
     pk: `user#${username}`,
     sk: 'user',
@@ -117,6 +141,7 @@ app.post('/login', async (req, res) => {
     return res.status(401).send('Invalid username or password');
   }
 
+  const secretKey = await getParameterStore(parameterStoreJwtSecretName);
   const token = jwt.sign({ 
     username, // it also automatically create attribute called 'username'
     exp: Math.floor(Date.now() / 1000) + (60 * 60 * 12)
