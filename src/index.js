@@ -1,15 +1,19 @@
 const { DynamoDBClient, GetItemCommand, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const app = express();
 const appEnv = process.env.NODE_ENV || 'development';
-const tableName = process.env.APP_TABLE_NAME || `express-todo-${appEnv}`;
+const tableName = process.env.APP_TABLE_NAME || `serverless-todos-${appEnv}`;
+const sqsQueueUrl = process.env.APP_SQS_URL;
+
 const ddbclient = new DynamoDBClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 const ssmclient = new SSMClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
+const sqsclient = new SQSClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 
 const parameterStoreJwtSecretName = `/serverless-todo/${appEnv}/jwt-secret`;
 const passwordOptions = {
@@ -63,6 +67,17 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+// Send welcome email to user who just registered
+async function sendWelcomeEmail(username)
+{
+  const queueResponse = await sqsclient.send(new SendMessageCommand({
+    QueueUrl: sqsQueueUrl,
+    MessageBody: JSON.stringify(({ username: username }))
+  }));
+  
+  console.log('queueResponse', queueResponse);
+}
+
 // Route for registering a user
 app.post('/register', async (req, res) => {
   const required = ['username', 'password', 'fullname', 'email'];
@@ -110,6 +125,9 @@ app.post('/register', async (req, res) => {
   };
   await ddbclient.send(new PutItemCommand(userItemParam));
   
+  // Send welcome email via queue
+  await sendWelcomeEmail(username);
+  
   // Send success message
   res.status(201).json({ message: 'User registered successfully' });
 });
@@ -144,6 +162,7 @@ app.post('/login', async (req, res) => {
   const secretKey = await getParameterStore(parameterStoreJwtSecretName);
   const token = jwt.sign({ 
     username, // it also automatically create attribute called 'username'
+    email: userItem.data.email,
     exp: Math.floor(Date.now() / 1000) + (60 * 60 * 12)
   }, secretKey);
 
