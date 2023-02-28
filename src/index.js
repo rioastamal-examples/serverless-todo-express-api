@@ -247,8 +247,11 @@ process.on('unhandledRejection', function(err) {
   console.log(err.stack);
 });
 
-const port = process.env.APP_PORT || 8080;
+module.exports = app;
 
-app.listen(port, function() {
-  console.log(`API server running on port ${port}`);
-});
+// See local.js to run this script locally
+// const port = process.env.APP_PORT || 8080;
+
+// app.listen(port, function() {
+//   console.log(`API server running on port ${port}`);
+// });
