@@ -1,7 +1,8 @@
 const { DynamoDBClient, GetItemCommand, PutItemCommand } = require('@aws-sdk/client-dynamodb');
 const { marshall, unmarshall } = require('@aws-sdk/util-dynamodb');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
-const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+// const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
 const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
@@ -9,11 +10,14 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const appEnv = process.env.NODE_ENV || 'development';
 const tableName = process.env.APP_TABLE_NAME || `serverless-todo-${appEnv}`;
-const sqsQueueUrl = process.env.APP_SQS_URL;
+const fromEmailAddr = process.env.APP_FROM_EMAIL_ADDR || undefined;
+const appUrl = process.env.APP_URL || 'https://REPLACE_THIS_VIA_ENV/';
+// const sqsQueueUrl = process.env.APP_SQS_URL;
 
 const ddbclient = new DynamoDBClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 const ssmclient = new SSMClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
-const sqsclient = new SQSClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
+const sesclient = new SESClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
+// const sqsclient = new SQSClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 
 const parameterStoreJwtSecretName = process.env.APP_PARAMSTORE_JWT_SECRET_NAME;
 const passwordOptions = {
@@ -67,15 +71,67 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-// Send welcome email to user who just registered
-async function sendWelcomeEmail(username)
-{
-  const queueResponse = await sqsclient.send(new SendMessageCommand({
-    QueueUrl: sqsQueueUrl,
-    MessageBody: JSON.stringify(({ username: username }))
-  }));
+// Send welcome email by sending username to the Queue to get processed by 
+// welcome email worker
+// async function sendWelcomeEmail(username)
+// {
+//   const queueResponse = await sqsclient.send(new SendMessageCommand({
+//     QueueUrl: sqsQueueUrl,
+//     MessageBody: JSON.stringify(({ username: username }))
+//   }));
   
-  console.log('queueResponse', queueResponse);
+//   console.log('queueResponse', queueResponse);
+// }
+
+// Send welcome email to registered user
+async function sendWelcomeEmail(options) {
+  const {username, email, fullname} = options;
+  
+  const body = {
+    Text: {
+      Charset: 'UTF-8',
+      Data: `Hello ${fullname},
+
+Welcome to the Serverless Todos!. Enjoy your free todo app at ${appUrl}.
+
+Cheers,
+Serverless Todos team
+`
+    },
+    
+    Html: {
+      Charset: 'UTF-8',
+      Data: `<html><body>
+<p>Hello <b>${fullname}</b>,<p>
+
+<p>Welcome to the Serverless Todos!. 
+Enjoy your free todo app at <a href="${appUrl}">our website</a>.</p>
+
+<p>Cheers,<br>
+Serverless Todos team</p>
+</body></html>
+`
+    }
+  };
+  const subject = {
+    Charset: 'UTF-8',
+    Data: 'Welcome to Serverless Todo'
+  };
+  const destination = { ToAddresses: [email] };
+  
+  const sendEmailParam = {
+    Destination: destination,
+    Source: fromEmailAddr,
+    Message: {
+      Subject: subject,
+      Body: body
+    }
+  };
+  
+  const mailResponse = await sesclient.send(new SendEmailCommand(sendEmailParam));
+  console.log('mailResponse', mailResponse);
+
+  return 'Message sent to ' + username;
 }
 
 // Route for registering a user
@@ -126,7 +182,7 @@ app.post('/register', async (req, res) => {
   await ddbclient.send(new PutItemCommand(userItemParam));
   
   // Send welcome email via queue
-  await sendWelcomeEmail(username);
+  await sendWelcomeEmail({ username, fullname, email });
   
   // Send success message
   res.status(201).json({ message: 'User registered successfully' });
