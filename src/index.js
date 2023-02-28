@@ -8,14 +8,14 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 const appEnv = process.env.NODE_ENV || 'development';
-const tableName = process.env.APP_TABLE_NAME || `serverless-todos-${appEnv}`;
+const tableName = process.env.APP_TABLE_NAME || `serverless-todo-${appEnv}`;
 const sqsQueueUrl = process.env.APP_SQS_URL;
 
 const ddbclient = new DynamoDBClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 const ssmclient = new SSMClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 const sqsclient = new SQSClient({ region: process.env.APP_REGION || 'ap-southeast-1' });
 
-const parameterStoreJwtSecretName = `/serverless-todo/${appEnv}/jwt-secret`;
+const parameterStoreJwtSecretName = process.env.APP_PARAMSTORE_JWT_SECRET_NAME;
 const passwordOptions = {
   iteration: 1000,
   length: 64,
