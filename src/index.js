@@ -45,6 +45,14 @@ async function getParameterStore(name)
   return response.Parameter.Value;
 }
 
+function validateEmail(email) {
+  return String(email)
+    .toLowerCase()
+    .match(
+      /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+    );
+}
+
 // Middleware for JWT authentication
 const authMiddleware = async (req, res, next) => {
   // Get token from authorization header
@@ -91,6 +99,10 @@ app.post('/register', async (req, res) => {
     }
   }
   const { username, password, email, fullname } = req.body;
+  
+  if (validateEmail(email) === null) {
+    return res.status(400).json({ message: 'Invalid email address' });
+  }
   
   const existingUserParam = {
       TableName: tableName,
