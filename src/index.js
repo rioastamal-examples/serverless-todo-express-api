@@ -87,98 +87,107 @@ async function sendWelcomeEmail(username)
 }
 
 // Route for registering a user
-app.post('/register', async (req, res) => {
-  const required = ['username', 'password', 'fullname', 'email'];
-  for (const field of required) {
-    if (req.body.hasOwnProperty(field) === false) {
-      return res.status(400).json({ message: `Missing "${field}" attribute` });
+app.post('/register', async (req, res, next) => {
+  try {
+    const required = ['username', 'password', 'fullname', 'email'];
+    for (const field of required) {
+      if (req.body.hasOwnProperty(field) === false) {
+        return res.status(400).json({ message: `Missing "${field}" attribute` });
+      }
+      
+      if (req.body[field].length < 3) {
+        return res.status(400).json({ message: `Value of "${field}" is too short` });
+      }
+    }
+    const { username, password, email, fullname } = req.body;
+    
+    if (validateEmail(email) === null) {
+      return res.status(400).json({ message: 'Invalid email address' });
     }
     
-    if (req.body[field].length < 3) {
-      return res.status(400).json({ message: `Value of "${field}" is too short` });
+    const existingUserParam = {
+        TableName: tableName,
+        Key: marshall({
+            pk: `user#${username}`,
+            sk: `user`
+        })
+    };
+    
+    const existingUserResponse = await ddbclient.send(new GetItemCommand(existingUserParam));
+    
+    if (existingUserResponse.Item !== undefined) {
+      return res.status(400).json({ message: 'Username already taken' });
     }
-  }
-  const { username, password, email, fullname } = req.body;
   
-  if (validateEmail(email) === null) {
-    return res.status(400).json({ message: 'Invalid email address' });
-  }
-  
-  const existingUserParam = {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hashedPassword = crypto.pbkdf2Sync(password, salt, 
+                              passwordOptions.iteration, passwordOptions.length, passwordOptions.digest
+                            ).toString('hex');
+    const createdAt = new Date().toISOString();
+    
+    const user = { username, password: hashedPassword, salt, fullname, email };
+    const userItem = {
+      pk: `user#${username}`,
+      sk: 'user',
+      data: user,
+      created_at: createdAt
+    };
+    const userItemParam = {
       TableName: tableName,
-      Key: marshall({
-          pk: `user#${username}`,
-          sk: `user`
-      })
-  };
-  
-  const existingUserResponse = await ddbclient.send(new GetItemCommand(existingUserParam));
-  
-  if (existingUserResponse.Item !== undefined) {
-    return res.status(400).json({ message: 'Username already taken' });
+      Item: marshall(userItem)
+    };
+    await ddbclient.send(new PutItemCommand(userItemParam));
+    
+    // Send welcome email via queue
+    await sendWelcomeEmail(username);
+    
+    // Send success message
+    res.status(201).json({ message: 'User registered successfully' });
+  } catch (error) {
+    // Todo: Implement rollback
+    next(error);
   }
-
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hashedPassword = crypto.pbkdf2Sync(password, salt, 
-                            passwordOptions.iteration, passwordOptions.length, passwordOptions.digest
-                          ).toString('hex');
-  const createdAt = new Date().toISOString();
-  
-  const user = { username, password: hashedPassword, salt, fullname, email };
-  const userItem = {
-    pk: `user#${username}`,
-    sk: 'user',
-    data: user,
-    created_at: createdAt
-  };
-  const userItemParam = {
-    TableName: tableName,
-    Item: marshall(userItem)
-  };
-  await ddbclient.send(new PutItemCommand(userItemParam));
-  
-  // Send welcome email via queue
-  await sendWelcomeEmail(username);
-  
-  // Send success message
-  res.status(201).json({ message: 'User registered successfully' });
 });
 
 // Route for logging in a user
-app.post('/login', async (req, res) => {
+app.post('/login', async (req, res, next) => {
+  try {
+    const { username, password } = req.body;
+    
+    const existingUserParam = {
+        TableName: tableName,
+        Key: marshall({
+            pk: `user#${username}`,
+            sk: `user`
+        })
+    };
 
-  const { username, password } = req.body;
-  
-  const existingUserParam = {
-      TableName: tableName,
-      Key: marshall({
-          pk: `user#${username}`,
-          sk: `user`
-      })
-  };
-  
-  const existingUserResponse = await ddbclient.send(new GetItemCommand(existingUserParam));
-  
-  if (existingUserResponse.Item === undefined) {
-    return res.status(401).json({ message: 'Invalid username or password' });
+    const existingUserResponse = await ddbclient.send(new GetItemCommand(existingUserParam));
+    
+    if (existingUserResponse.Item === undefined) {
+      return res.status(401).json({ message: 'Invalid username or password' });
+    }
+
+    const userItem = unmarshall(existingUserResponse.Item);
+    const hashedPassword = crypto.pbkdf2Sync(password, userItem.data.salt, 
+                              passwordOptions.iteration, passwordOptions.length, passwordOptions.digest
+                            ).toString('hex');
+                            
+    if (hashedPassword !== userItem.data.password) {
+      return res.status(401).send({ message: 'Invalid username or password' });
+    }
+
+    const secretKey = await getParameterStore(parameterStoreJwtSecretName);
+    const token = jwt.sign({ 
+      username, // it also automatically create attribute called 'username'
+      email: userItem.data.email,
+      exp: Math.floor(Date.now() / 1000) + (60 * 60 * 12)
+    }, secretKey);
+
+    res.json({ token });
+  } catch (error) {
+    next(error);
   }
-  const userItem = unmarshall(existingUserResponse.Item);
-  const hashedPassword = crypto.pbkdf2Sync(password, userItem.data.salt, 
-                            passwordOptions.iteration, passwordOptions.length, passwordOptions.digest
-                          ).toString('hex');
-                          
-  if (hashedPassword !== userItem.data.password) {
-    return res.status(401).send('Invalid username or password');
-  }
-
-  const secretKey = await getParameterStore(parameterStoreJwtSecretName);
-  const token = jwt.sign({ 
-    username, // it also automatically create attribute called 'username'
-    email: userItem.data.email,
-    exp: Math.floor(Date.now() / 1000) + (60 * 60 * 12)
-  }, secretKey);
-
-  res.json({ token });
 });
 
 // A test route that requires authentication
@@ -198,7 +207,7 @@ app.get('/todos/:id', authMiddleware, async (req, res, next) => {
       TableName: tableName,
       Key: marshall({
         pk: `todo#${req.params.id}`,
-        sk: `todo-${req.user.username}`
+        sk: `todo#${req.user.username}`
       })
     };
     
@@ -214,32 +223,37 @@ app.get('/todos/:id', authMiddleware, async (req, res, next) => {
   }
 });
 
-app.put('/todos/:id', authMiddleware, (req, res) => {
-  if (! req.params.id) {
-    res.status(400).json({
-      message: "Bad request: Missing todo id."
-    });
+app.put('/todos/:id', authMiddleware, (req, res, next) => {
+  try {
+    if (! req.params.id) {
+      res.status(400).json({
+        message: "Bad request: Missing todo id."
+      });
+      
+      return;
+    }
     
-    return;
+    const todoItem = {
+      pk: `todo#${req.params.id}`,
+      sk: 'todo#' + req.user.username,
+      data: req.body,
+      created_at: new Date().toISOString()
+    };
+    
+    const todoItemParam = {
+      TableName: tableName,
+      Item: marshall(todoItem)
+    };
+    
+    ddbclient.send(new PutItemCommand(todoItemParam));
+    
+    console.log(req.body);
+    res.json({
+      "message": "Todo successfully added"
+    });    
+  } catch (error) {
+    next(error);
   }
-  
-  const todoItem = {
-    pk: `todo#${req.params.id}`,
-    sk: 'todo-' + req.user.username,
-    data: req.body
-  };
-  
-  const todoItemParam = {
-    TableName: tableName,
-    Item: marshall(todoItem)
-  };
-  
-  ddbclient.send(new PutItemCommand(todoItemParam));
-  
-  console.log(req.body);
-  res.json({
-    "message": "Todo successfully added"
-  });
 });
 
 // Custom error handler function to handle JSON parsing errors
